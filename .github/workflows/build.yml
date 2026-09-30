@@ -1,0 +1,142 @@
+name: build
+
+# Tracks Apache Guacamole releases automatically:
+#  - daily: if Apache has published a newer stable release (and its official
+#    images exist on Docker Hub) that we have not built yet, build + publish it
+#  - weekly: rebuild the current release to pick up Alpine security patches
+#  - push to main / manual run: build + publish
+#  - pull requests: build + smoke test only
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"   # daily new-release check
+    - cron: "17 4 * * 1"   # weekly rebuild (Mondays)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Guacamole version to build (blank = latest stable)"
+        required: false
+      force:
+        description: "Rebuild even if the tag already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      minor: ${{ steps.v.outputs.minor }}
+      image: ${{ steps.v.outputs.image }}
+      build: ${{ steps.v.outputs.build }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_FORCE: ${{ inputs.force }}
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${REPO,,}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          else
+            # Latest stable (x.y.z, no -RC) tag of the upstream server repo
+            version="$(gh api --paginate repos/apache/guacamole-server/tags --jq '.[].name' \
+                       | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          fi
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "minor=${version%.*}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Guacamole $version"
+
+          # Apache publishes the release tag before the Docker Hub images;
+          # both official images are required as build inputs.
+          for repo in guacamole/guacd guacamole/guacamole; do
+            if ! docker manifest inspect "$repo:$version" >/dev/null 2>&1; then
+              echo "::notice::$repo:$version is not on Docker Hub yet; skipping"
+              echo "build=false" >> "$GITHUB_OUTPUT"; echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          build=true; publish=true
+          case "$EVENT" in
+            pull_request) publish=false ;;
+            schedule)
+              if [ "$SCHEDULE" = "17 3 * * *" ] && \
+                 docker manifest inspect "$image:$version" >/dev/null 2>&1; then
+                echo "$image:$version already published; nothing to do"
+                build=false; publish=false
+              fi ;;
+          esac
+          echo "build=$build"     >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      IMAGE: ${{ needs.resolve.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (amd64) for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          build-args: GUAC_VERSION=${{ env.VERSION }}
+          tags: guacamole-turnkey:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: bash tests/smoke.sh guacamole-turnkey:smoke
+
+      - name: Log in to GHCR
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64 + arm64)
+        if: needs.resolve.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: GUAC_VERSION=${{ env.VERSION }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ needs.resolve.outputs.minor }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
