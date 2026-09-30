@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Files executed inside the Linux container must always use LF, even when the
+# repo is checked out on Windows with core.autocrlf=true.
+*.sh        text eol=lf
+Dockerfile  text eol=lf
+*.sql       text eol=lf

@@ -1,0 +1,38 @@
+# Minimal turnkey deployment. `docker compose up -d`, then read the initial
+# admin password with `docker compose logs guacamole | grep password`.
+services:
+  guacamole:
+    image: ghcr.io/smck83/guacamole:latest
+    container_name: guacamole
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - guacamole-data:/data
+    environment:
+      TZ: UTC
+
+      # --- Optional: first-boot admin account (otherwise a random password
+      # --- is generated and printed to the logs)
+      # GUACADMIN_USERNAME: admin
+      # GUACADMIN_PASSWORD: change-me
+
+      # --- Feature toggles (upstream Guacamole variables) --------------------
+      # TOTP_ENABLED: "true"            # two-factor auth for every user
+      # TOTP_ISSUER: "Homelab"
+      # BAN_ENABLED: "true"             # brute-force lockout (default on)
+      # QUICKCONNECT_ENABLED: "true"    # ad-hoc connections by URI
+      # RECORDING_ENABLED: "false"      # hide recording playback in history
+      # DISPLAY_STATISTICS_ENABLED: "true"
+
+      # --- Behind a reverse proxy (real client IPs in logs / ban extension) --
+      # REMOTE_IP_VALVE_ENABLED: "true"
+
+      # --- External database instead of the embedded one ---------------------
+      # POSTGRESQL_HOSTNAME: db
+      # POSTGRESQL_DATABASE: guacamole_db
+      # POSTGRESQL_USERNAME: guacamole
+      # POSTGRESQL_PASSWORD: secret
+
+volumes:
+  guacamole-data:
