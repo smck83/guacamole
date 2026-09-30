@@ -140,3 +140,63 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Browser host for URL connections. Independent of the Guacamole version, so
+  # it builds on pushes, PRs, manual runs and the weekly refresh only.
+  browser:
+    if: github.event_name != 'schedule' || github.event.schedule == '17 4 * * 1'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/guacamole-browser
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (amd64) for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: browser
+          load: true
+          tags: guacamole-browser:smoke
+          cache-from: type=gha,scope=browser
+          cache-to: type=gha,mode=max,scope=browser
+
+      - name: Smoke test
+        run: |
+          docker run -d --name b --security-opt seccomp=unconfined \
+            -e BROWSER_PASSWORD=smoke guacamole-browser:smoke
+          for i in $(seq 1 30); do
+            docker logs b 2>&1 | grep -q 'xrdp listening' && break; sleep 2
+          done
+          docker logs b
+          # Runner kernels may restrict user namespaces; report, don't fail
+          docker logs b 2>&1 | grep -q 'Chromium sandbox: enabled' \
+            || echo "::warning::Chromium sandbox unavailable on this runner"
+          docker exec b bash -c '</dev/tcp/127.0.0.1/3389'
+          # Must refuse to start without a password
+          ! docker run --rm guacamole-browser:smoke
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (amd64 + arm64)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: browser
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=browser
+          cache-to: type=gha,mode=max,scope=browser

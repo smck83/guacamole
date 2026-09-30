@@ -34,5 +34,28 @@ services:
       # POSTGRESQL_USERNAME: guacamole
       # POSTGRESQL_PASSWORD: secret
 
+  # --- Optional: browser host for "URL connections" to internal web UIs -----
+  # Enable with:  BROWSER_PASSWORD=<random> docker compose --profile browser up -d
+  # Then in Guacamole add an RDP connection: hostname "browser", username
+  # "browser", the same password, "Ignore server certificate" ticked, and
+  # Initial program:  open-url https://192.168.89.1
+  browser:
+    image: ghcr.io/smck83/guacamole-browser:latest
+    container_name: guacamole-browser
+    restart: unless-stopped
+    profiles: [browser]
+    # No ports: only Guacamole needs to reach it, over the compose network
+    security_opt:
+      # Lets Chromium use its own (much stricter) per-tab sandbox, which needs
+      # user namespaces that Docker's default seccomp profile blocks. Without
+      # this line the browser falls back to --no-sandbox.
+      - seccomp=unconfined
+    shm_size: 512m
+    environment:
+      BROWSER_PASSWORD: ${BROWSER_PASSWORD:-}
+      # BROWSER_MODE: kiosk                 # kiosk | app | full
+      # BROWSER_IGNORE_CERT_ERRORS: "true"  # self-signed router/NAS certs
+      # BROWSER_ALLOWED_URLS: "192.168.89.1,nas.home.arpa"
+
 volumes:
   guacamole-data:

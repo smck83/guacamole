@@ -106,6 +106,57 @@ with `/opt/guacamole/bin/initdb.sh --sqlserver`.
 current database. If the database is older than the image, set
 `DB_SCHEMA_VERSION=<old version>` once so the upgrade scripts run.
 
+## URL connections (internal web UIs)
+
+Guacamole streams remote screens; it can't show a web page by itself. The
+optional `guacamole-browser` container is a small RDP server whose sessions run
+nothing but a kiosk Chromium. That lets a Guacamole connection open a web UI
+such as `https://192.168.89.1` (router, NAS, iLO/iDRAC, printer) from anywhere,
+without exposing that UI.
+
+```bash
+BROWSER_PASSWORD=$(openssl rand -hex 16) docker compose --profile browser up -d
+```
+
+In Guacamole, add an **RDP** connection:
+
+| Field | Value |
+|---|---|
+| Hostname / Port | `browser` / `3389` |
+| Username / Password | `browser` / your `BROWSER_PASSWORD` |
+| Security mode | Any, with **Ignore server certificate** ticked |
+| Resize method | Display update |
+| **Initial program** | `open-url https://192.168.89.1` |
+
+Quote URLs that contain `&`, `;` or spaces: `open-url 'https://nas/?a=1&b=2'`.
+
+How it behaves:
+
+- **One session per connection.** Each connection gets its own X session and
+  a fresh, throwaway Chromium profile. Cookies and logins are gone when the
+  connection closes. If you just go back to Guacamole's home screen, the
+  session is kept open in the background. When you close it, it is killed
+  after about 60 seconds and its profile is deleted.
+- **Hardened by default.** Password saving, autofill, sign-in, sync,
+  downloads and developer tools are all off.
+- **Sandboxed.** Chromium's own per-tab sandbox is on when the container has
+  `security_opt: [seccomp=unconfined]` (the compose file sets this). Without
+  it, the browser falls back to `--no-sandbox` and logs a warning.
+- **Private.** The browser container publishes no ports. Only Guacamole
+  reaches it, over the compose network.
+
+| Variable | Default | |
+|---|---|---|
+| `BROWSER_PASSWORD` / `_FILE` | – (required) | RDP login used by Guacamole connections |
+| `BROWSER_MODE` | `kiosk` | `kiosk` (no address bar), `app` (minimal window), `full` (normal browser) |
+| `BROWSER_IGNORE_CERT_ERRORS` | `false` | skip the warning for self-signed router/NAS certificates |
+| `BROWSER_ALLOWED_URLS` | – | comma-separated allowlist, e.g. `192.168.89.1,nas.home.arpa,home.arpa` (hosts or domains, [Chromium URL-filter format](https://support.google.com/chrome/a/answer/9942583) — no CIDR ranges); everything else blocked |
+| `BROWSER_SANDBOX` | `auto` | `on` / `off` to force |
+
+Security note: anyone allowed to *edit* connections controls the initial
+program, which runs as the unprivileged `browser` user inside this container.
+In practice that is only Guacamole admins.
+
 ## Backup & restore
 
 ```bash

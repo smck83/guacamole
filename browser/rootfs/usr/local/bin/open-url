@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# open-url [URL]
+#
+# Set as the "Initial program" of a Guacamole RDP connection. Runs a Chromium
+# window filling the session, with a fresh profile that is deleted on exit.
+# The RDP session ends when the browser closes.
+#
+# Quote URLs that contain & ; or spaces:  open-url 'https://nas/?a=1&b=2'
+#
+. /etc/browser.conf
+
+url="${1:-$BROWSER_HOME_URL}"
+case "$url" in
+    http://*|https://*|about:blank) ;;
+    *) url="https://$url" ;;
+esac
+
+profile="$(mktemp -d /tmp/chromium-profile.XXXXXXXX)"
+trap 'rm -rf "$profile"' EXIT INT TERM HUP
+
+set -- \
+    --user-data-dir="$profile" \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-features=Translate,MediaRouter \
+    --disable-dev-shm-usage \
+    --disable-gpu \
+    --password-store=basic \
+    --start-maximized
+
+[ "$BROWSER_IGNORE_CERT_ERRORS" = "true" ] && set -- "$@" --ignore-certificate-errors
+[ "$BROWSER_NO_SANDBOX" = "true" ]         && set -- "$@" --no-sandbox
+
+case "$BROWSER_MODE" in
+    kiosk) set -- "$@" --kiosk "$url" ;;          # no address bar, locked to page
+    app)   set -- "$@" --app="$url" ;;            # minimal window, links open in-place
+    *)     set -- "$@" "$url" ;;                  # full browser UI
+esac
+
+# Not exec: the trap must run to delete the profile. Output of the most recent
+# session is kept in ~/.open-url.log for troubleshooting.
+dbus-launch --exit-with-session chromium "$@" > "$HOME/.open-url.log" 2>&1

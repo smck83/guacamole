@@ -1,0 +1,112 @@
+#!/bin/bash
+set -euo pipefail
+
+log() { echo "[browser] $*"; }
+die() { echo "[browser] ERROR: $*" >&2; exit 1; }
+
+# RDP login used by Guacamole connections (Guacamole stores it; users never
+# see it). Required so the RDP port is never open without a password.
+BROWSER_PASSWORD="${BROWSER_PASSWORD:-$(cat "${BROWSER_PASSWORD_FILE:-/dev/null}" 2>/dev/null || true)}"
+[ -n "$BROWSER_PASSWORD" ] || die "BROWSER_PASSWORD (or BROWSER_PASSWORD_FILE) must be set"
+echo "browser:$BROWSER_PASSWORD" | chpasswd
+
+# Per-install TLS certificate and RSA keys instead of the ones baked into the
+# image at build time
+if [ ! -e /etc/xrdp/.keys-generated ]; then
+    DEBIAN_FRONTEND=noninteractive make-ssl-cert generate-default-snakeoil --force-overwrite
+    xrdp-keygen xrdp /etc/xrdp/rsakeys.ini >/dev/null
+    touch /etc/xrdp/.keys-generated
+fi
+
+# Session policy: one fresh session per connection, killed on disconnect, so a
+# new connection always opens its own URL rather than reattaching.
+sed -i -E \
+    -e 's/^Policy=.*/Policy=UBDC/' \
+    -e 's/^KillDisconnected=.*/KillDisconnected=true/' \
+    -e 's/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=0/' \
+    -e 's/^AllowRootLogin=.*/AllowRootLogin=false/' \
+    -e 's/^AllowAlternateShell=.*/AllowAlternateShell=true/' \
+    /etc/xrdp/sesman.ini
+
+# Chromium's sandbox needs user namespaces, which Docker's default seccomp
+# profile blocks. auto = use it if it works here, else fall back with a warning.
+sandbox_works() {
+    local p; p="$(mktemp -d)"; chown browser "$p"
+    timeout 30 su -s /bin/sh browser -c \
+        "chromium --headless=new --user-data-dir='$p' --dump-dom about:blank" >/dev/null 2>&1
+    local rc=$?; rm -rf "$p"; return $rc
+}
+no_sandbox=false
+case "${BROWSER_SANDBOX:-auto}" in
+    on)  ;;
+    off) no_sandbox=true; log "Chromium sandbox disabled (BROWSER_SANDBOX=off)" ;;
+    *)   if sandbox_works; then
+             log "Chromium sandbox: enabled"
+         else
+             no_sandbox=true
+             log "WARNING: Chromium sandbox unavailable under this container's seccomp profile;"
+             log "WARNING: running with --no-sandbox. Add 'security_opt: [seccomp=unconfined]' to enable it."
+         fi ;;
+esac
+
+# Settings for open-url, which runs inside the xrdp session with a scrubbed
+# environment and so cannot see container variables directly
+{
+    printf 'BROWSER_MODE=%q\n'               "${BROWSER_MODE:-kiosk}"
+    printf 'BROWSER_HOME_URL=%q\n'           "${BROWSER_HOME_URL:-about:blank}"
+    printf 'BROWSER_IGNORE_CERT_ERRORS=%q\n' "${BROWSER_IGNORE_CERT_ERRORS:-false}"
+    printf 'BROWSER_NO_SANDBOX=%q\n'         "$no_sandbox"
+} > /etc/browser.conf
+
+# Chromium managed policy: hardening defaults, plus an optional allowlist
+# (comma-separated Chromium URL filters, e.g. "192.168.89.1,home.arpa")
+mkdir -p /etc/chromium/policies/managed
+jq -n --arg allow "${BROWSER_ALLOWED_URLS:-}" '
+  {
+    PasswordManagerEnabled: false,
+    AutofillAddressEnabled: false,
+    AutofillCreditCardEnabled: false,
+    BrowserSignin: 0,
+    SyncDisabled: true,
+    MetricsReportingEnabled: false,
+    DefaultBrowserSettingEnabled: false,
+    DeveloperToolsAvailability: 2,
+    DownloadRestrictions: 3,
+    PromotionalTabsEnabled: false
+  }
+  + (if $allow == "" then {} else {
+      URLBlocklist: ["*"],
+      URLAllowlist: ($allow | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
+    } end)
+' > /etc/chromium/policies/managed/turnkey.json
+[ -z "${BROWSER_ALLOWED_URLS:-}" ] || log "URL allowlist: $BROWSER_ALLOWED_URLS"
+
+rm -f /var/run/xrdp/*.pid /var/run/xrdp/xrdp*.pid
+mkdir -p /var/run/xrdp && chown xrdp:xrdp /var/run/xrdp
+
+xrdp-sesman --nodaemon &
+xrdp --nodaemon &
+log "xrdp listening on 3389"
+
+# Sessions are torn down with SIGKILL when a connection closes, so open-url's
+# own cleanup cannot be relied on. Delete any throwaway profile whose Chromium
+# is gone (SingletonLock -> "<host>-<pid>"), or that never got a lock.
+sweep_profiles() {
+    while sleep 30; do
+        for p in /tmp/chromium-profile.*; do
+            [ -d "$p" ] || continue
+            lock="$(readlink "$p/SingletonLock" 2>/dev/null || true)"
+            if [ -n "$lock" ]; then
+                kill -0 "${lock##*-}" 2>/dev/null && continue
+            elif [ -z "$(find "$p" -maxdepth 0 -mmin +2)" ]; then
+                continue    # just created; Chromium still starting
+            fi
+            rm -rf "$p"
+        done
+    done
+}
+sweep_profiles &
+
+trap 'kill -TERM $(jobs -p) 2>/dev/null; wait' TERM INT
+wait -n
+die "xrdp exited"
