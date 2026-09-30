@@ -165,16 +165,16 @@ jobs:
 
       - name: Smoke test
         run: |
-          docker run -d --name b --security-opt seccomp=unconfined \
+          docker run -d --name browser-smoke --security-opt seccomp=unconfined \
             -e BROWSER_PASSWORD=smoke guacamole-browser:smoke
           for i in $(seq 1 30); do
-            docker logs b 2>&1 | grep -q 'xrdp listening' && break; sleep 2
+            docker logs browser-smoke 2>&1 | grep -q 'xrdp listening' && break; sleep 2
           done
-          docker logs b
+          docker logs browser-smoke
           # Runner kernels may restrict user namespaces; report, don't fail
-          docker logs b 2>&1 | grep -q 'Chromium sandbox: enabled' \
+          docker logs browser-smoke 2>&1 | grep -q 'Chromium sandbox: enabled' \
             || echo "::warning::Chromium sandbox unavailable on this runner"
-          docker exec b bash -c '</dev/tcp/127.0.0.1/3389'
+          docker exec browser-smoke bash -c '</dev/tcp/127.0.0.1/3389'
           # Must refuse to start without a password
           ! docker run --rm guacamole-browser:smoke
 
